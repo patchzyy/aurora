@@ -5,10 +5,7 @@
 extern "C" {
 void GXDestroyTexObj(GXTexObj* obj_) {
   auto* obj = reinterpret_cast<GXTexObj_*>(obj_);
-  if (obj->texObjId != 0) {
-    GX_WRITE_AURORA(GX_LOAD_AURORA_DESTROY_TEXOBJ);
-    GX_WRITE_U32(obj->texObjId);
-  }
+  // Destroying a GX texture descriptor must not discard cached texture pixels.
   obj->texObjId = 0;
 }
 

@@ -4,6 +4,7 @@
 #include "magic_enum.hpp"
 
 #include <SDL3/SDL_haptic.h>
+#include <SDL3/SDL_properties.h>
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_filesystem.h>
 #include <SDL3/SDL_iostream.h>
@@ -324,24 +325,6 @@ GameController* get_controller_for_player(uint32_t player) noexcept {
     }
   }
 
-#if 0
-  /* If we don't have a controller assigned to this port use the first unassigned controller */
-  if (!g_GameControllers.empty()) {
-    int32_t availIndex = -1;
-    GameController* ct = nullptr;
-    for (auto& controller : g_GameControllers) {
-      if (player_index(controller.first) == -1) {
-        availIndex = controller.first;
-        ct = &controller.second;
-        break;
-      }
-    }
-    if (availIndex != -1) {
-      set_player_index(availIndex, player);
-      return ct;
-    }
-  }
-#endif
   return nullptr;
 }
 
@@ -356,6 +339,9 @@ Sint32 get_instance_for_player(uint32_t player) noexcept {
 }
 
 SDL_JoystickID add_controller(SDL_JoystickID which) noexcept {
+  if (g_GameControllers.contains(which)) {
+    return which;
+  }
   auto* ctrl = SDL_OpenGamepad(which);
   if (ctrl != nullptr) {
     GameController controller;
@@ -368,7 +354,7 @@ SDL_JoystickID add_controller(SDL_JoystickID which) noexcept {
       SDL_CloseGamepad(ctrl);
       return -1;
     }
-    controller.m_isGameCube = controller.m_vid == 0x057E && controller.m_vid == 0x0337;
+    controller.m_isGameCube = controller.m_vid == 0x057E && controller.m_pid == 0x0337;
     if (controller.m_isGameCube ||
         (SDL_GetGamepadType(ctrl) == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO && controller.m_pid == 0x2073)) {
       controller.m_deadZones.emulateTriggers = false;
@@ -402,7 +388,8 @@ bool is_gamecube(Uint32 instance) noexcept {
 
 int32_t player_index(Uint32 instance) noexcept {
   if (auto it = g_GameControllers.find(instance); it != g_GameControllers.end()) {
-    return SDL_GetGamepadPlayerIndex(it->second.m_controller);
+    const int player = SDL_GetGamepadPlayerIndex(it->second.m_controller);
+    return player >= 0 ? player : it->second.m_playerIndex;
   }
   return -1;
 }
@@ -410,6 +397,7 @@ int32_t player_index(Uint32 instance) noexcept {
 void set_player_index(Uint32 instance, Sint32 index) noexcept {
   if (auto it = g_GameControllers.find(instance); it != g_GameControllers.end()) {
     SDL_SetGamepadPlayerIndex(it->second.m_controller, index);
+    it->second.m_playerIndex = index;
   }
 }
 

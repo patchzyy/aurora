@@ -89,13 +89,27 @@ else ()
   message(STATUS "aurora: Using existing fmt")
 endif ()
 
+# fmt 11.1 drops its libc++ transitive includes but still calls malloc/free without <cstdlib>.
+# Force the missing header for fmt and its consumers until the pinned release is updated.
+if (MINGW AND TARGET fmt)
+  target_compile_options(fmt PUBLIC
+    $<$<COMPILE_LANGUAGE:CXX>:-include>
+    $<$<COMPILE_LANGUAGE:CXX>:cstdlib>)
+endif ()
+
 if (AURORA_ENABLE_GX)
   if (NOT TARGET ZLIB::ZLIB)
     aurora_find_package_global(ZLIB QUIET)
   endif ()
   if (NOT TARGET ZLIB::ZLIB)
     message(STATUS "aurora: Fetching zlib")
-    set(ZLIB_BUILD_SHARED ${_USE_SHARED} CACHE BOOL "Enable building zlib shared library" FORCE)
+    set(_AURORA_ZLIB_SHARED ${_USE_SHARED})
+    # ClangCL injects Clang's C headers into the MSVC resource compiler path, and zlib's DLL version
+    # resource then hits syntax rc.exe cannot parse. Use the resource-free static target here.
+    if (MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+      set(_AURORA_ZLIB_SHARED OFF)
+    endif ()
+    set(ZLIB_BUILD_SHARED ${_AURORA_ZLIB_SHARED} CACHE BOOL "Enable building zlib shared library" FORCE)
     set(ZLIB_BUILD_TESTING OFF CACHE BOOL "Enable Zlib Examples as tests" FORCE)
     set(ZLIB_INSTALL OFF CACHE BOOL "Enable installation of zlib" FORCE)
     FetchContent_Declare(
@@ -106,6 +120,9 @@ if (AURORA_ENABLE_GX)
       EXCLUDE_FROM_ALL
     )
     FetchContent_MakeAvailable(ZLIB)
+    if (NOT TARGET ZLIB::ZLIB AND TARGET ZLIB::ZLIBSTATIC)
+      add_library(ZLIB::ZLIB ALIAS zlibstatic)
+    endif ()
     if (NOT TARGET ZLIB::ZLIB)
       message(FATAL_ERROR "Failed to make zlib available")
     endif ()
@@ -234,6 +251,29 @@ if (AURORA_ENABLE_GX)
       message(STATUS "aurora: Fetching zstd")
       set(ZSTD_BUILD_STATIC ON)
       set(ZSTD_BUILD_SHARED OFF)
+      set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "BUILD PROGRAMS" FORCE)
+      set(ZSTD_BUILD_TESTS OFF CACHE BOOL "BUILD TESTS" FORCE)
+
+      if (WIN32 AND CMAKE_C_COMPILER_ID MATCHES "Clang" AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        set(C_FLAG_WALL TRUE CACHE INTERNAL "")
+        set(CXX_FLAG_WALL TRUE CACHE INTERNAL "")
+        set(C_FLAG_WEXTRA TRUE CACHE INTERNAL "")
+        set(CXX_FLAG_WEXTRA TRUE CACHE INTERNAL "")
+        set(C_FLAG_WUNDEF TRUE CACHE INTERNAL "")
+        set(CXX_FLAG_WUNDEF TRUE CACHE INTERNAL "")
+        set(C_FLAG_WSHADOW TRUE CACHE INTERNAL "")
+        set(CXX_FLAG_WSHADOW TRUE CACHE INTERNAL "")
+        set(C_FLAG_WCAST_ALIGN TRUE CACHE INTERNAL "")
+        set(CXX_FLAG_WCAST_ALIGN TRUE CACHE INTERNAL "")
+        set(C_FLAG_WCAST_QUAL TRUE CACHE INTERNAL "")
+        set(CXX_FLAG_WCAST_QUAL TRUE CACHE INTERNAL "")
+        set(C_FLAG_WSTRICT_PROTOTYPES TRUE CACHE INTERNAL "")
+        set(LD_FLAG_WL_Z_NOEXECSTACK FALSE CACHE INTERNAL "")
+        set(C_FLAG_QUNUSED_ARGUMENTS TRUE CACHE INTERNAL "")
+        set(CXX_FLAG_QUNUSED_ARGUMENTS TRUE CACHE INTERNAL "")
+        set(C_FLAG_WA_NOEXECSTACK TRUE CACHE INTERNAL "")
+        set(CXX_FLAG_WA_NOEXECSTACK TRUE CACHE INTERNAL "")
+      endif()
 
       FetchContent_Declare(zstd
         URL https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz
@@ -246,23 +286,6 @@ if (AURORA_ENABLE_GX)
     else ()
       message(STATUS "aurora: Using existing zstd")
     endif ()
-  endif ()
-
-  if (AURORA_ENABLE_RMLUI AND NOT TARGET RmlUi)
-    message(STATUS "aurora: Fetching RmlUi")
-    FetchContent_Declare(rmlui
-      URL https://github.com/mikke89/RmlUi/archive/f9b8c9e2935d5df2c7dff2c190d3968e99b0c3dc.tar.gz
-      URL_HASH SHA256=42b830abc2509a8c07cf02ba3313505de3a4642725654f489402022d8fefdd79
-      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-      EXCLUDE_FROM_ALL
-    )
-    FetchContent_MakeAvailable(rmlui)
-
-    add_library(rmlui_backends STATIC ${rmlui_SOURCE_DIR}/Backends/RmlUi_Platform_SDL.cpp)
-    # TODO: maybe dont hardcode this to SDL3?
-    target_compile_definitions(rmlui_backends PUBLIC RMLUI_SDL_VERSION_MAJOR=3)
-    target_include_directories(rmlui_backends PUBLIC ${rmlui_SOURCE_DIR}/Backends)
-    target_link_libraries(rmlui_backends PRIVATE rmlui ${AURORA_SDL3_TARGET})
   endif ()
 endif ()
 

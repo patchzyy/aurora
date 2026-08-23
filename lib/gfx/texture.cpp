@@ -26,6 +26,15 @@ Module Log("aurora::gfx");
 
 constexpr u32 div_ceil(u32 value, u32 divisor) noexcept { return (value + divisor - 1) / divisor; }
 
+uint32_t clamp_mip_count(uint32_t width, uint32_t height, uint32_t mips, const char* label) noexcept {
+  const uint32_t maxMips = max_texture_mip_count(width, height);
+  const uint32_t safeMips = std::clamp(mips, 1u, maxMips);
+  if (safeMips != mips) {
+    Log.warn("{}: clamping mip count {} to {} for {}x{} texture", label, mips, safeMips, width, height);
+  }
+  return safeMips;
+}
+
 wgpu::Extent3D physical_size(wgpu::Extent3D size, TextureFormatInfo info) {
   const uint32_t width = ((size.width + info.blockWidth - 1) / info.blockWidth) * info.blockWidth;
   const uint32_t height = ((size.height + info.blockHeight - 1) / info.blockHeight) * info.blockHeight;
@@ -72,6 +81,7 @@ TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mi
                                     bool tlut, const char* label) noexcept {
   ZoneScoped;
 
+  mips = clamp_mip_count(width, height, mips, label);
   auto handle = new_dynamic_texture_2d(width, height, mips, format, label);
   auto& ref = *handle;
 
@@ -103,8 +113,11 @@ TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mi
     const uint32_t heightBlocks = physicalSize.height / info.blockHeight;
     const uint32_t bytesPerRow = widthBlocks * info.blockSize;
     const uint32_t dataSize = bytesPerRow * heightBlocks * mipSize.depthOrArrayLayers;
-    CHECK(offset + dataSize <= data.size(), "new_static_texture_2d[{}]: expected at least {} bytes, got {}", label,
-          offset + dataSize, data.size());
+    if (offset > data.size() || dataSize > data.size() - offset) {
+      Log.warn("new_static_texture_2d[{}]: stopping at mip {}: expected at least {} bytes, got {}", label, mip,
+               static_cast<size_t>(offset) + dataSize, data.size());
+      return handle;
+    }
     const wgpu::TexelCopyTextureInfo dstView{
         .texture = ref.texture,
         .mipLevel = mip,
@@ -135,6 +148,7 @@ TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mi
 TextureHandle new_dynamic_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 gxFormat,
                                      const char* label) noexcept {
   ZoneScopedS(3);
+  mips = clamp_mip_count(width, height, mips, label);
   const auto wgpuFormat = to_wgpu(gxFormat);
   const wgpu::Extent3D size{
       .width = width,
@@ -174,7 +188,8 @@ TextureHandle new_render_texture(uint32_t width, uint32_t height, u32 gxFormat, 
   };
   const wgpu::TextureDescriptor textureDescriptor{
       .label = label,
-      .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::RenderAttachment,
+      .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopySrc | wgpu::TextureUsage::CopyDst |
+               wgpu::TextureUsage::RenderAttachment,
       .dimension = wgpu::TextureDimension::e2D,
       .size = size,
       .format = wgpuFormat,
@@ -207,7 +222,8 @@ TextureHandle new_conv_texture(uint32_t width, uint32_t height, u32 gxFormat, co
   };
   const wgpu::TextureDescriptor textureDescriptor{
       .label = label,
-      .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::RenderAttachment,
+      .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopySrc |
+               wgpu::TextureUsage::RenderAttachment,
       .dimension = wgpu::TextureDimension::e2D,
       .size = size,
       .format = wgpuFormat,
@@ -254,8 +270,11 @@ void write_texture(TextureRef& ref, ArrayRef<uint8_t> data) noexcept {
     const uint32_t heightBlocks = physicalSize.height / info.blockHeight;
     const uint32_t bytesPerRow = widthBlocks * info.blockSize;
     const uint32_t dataSize = bytesPerRow * heightBlocks * mipSize.depthOrArrayLayers;
-    CHECK(offset + dataSize <= data.size(), "write_texture: expected at least {} bytes, got {}", offset + dataSize,
-          data.size());
+    if (offset > data.size() || dataSize > data.size() - offset) {
+      Log.warn("write_texture: stopping at mip {}: expected at least {} bytes, got {}", mip,
+               static_cast<size_t>(offset) + dataSize, data.size());
+      return;
+    }
     const wgpu::TexelCopyTextureInfo dstView{
         .texture = ref.texture,
         .mipLevel = mip,

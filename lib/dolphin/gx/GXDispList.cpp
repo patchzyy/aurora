@@ -58,12 +58,14 @@ void GXCallDisplayList(const void* data, u32 nbytes) {
     __GXSendFlushPrim();
   }
 
-  // Drain the internal FIFO so that any pending CP register writes
-  // (VCD, VAT, etc.) are processed into g_gxState before the display
-  // list's draw commands reference them.
-  aurora::gx::fifo::drain();
+  // Nested display-list calls add bytes instead of changing live renderer state.
+  if (aurora::gx::fifo::in_display_list()) {
+    aurora::gx::fifo::write_data(data, nbytes);
+    return;
+  }
 
-  // Process the display list through the command processor
+  // Decode the display list immediately while its borrowed resources are valid.
+  aurora::gx::fifo::drain();
   aurora::gx::fifo::process(static_cast<const u8*>(data), nbytes, true);
 }
 
@@ -78,9 +80,7 @@ void GXCallDisplayListLE(const void* data, u32 nbytes) {
     __GXSendFlushPrim();
   }
 
-  // Drain the internal FIFO so that any pending CP register writes
-  // (VCD, VAT, etc.) are processed into g_gxState before the display
-  // list's draw commands reference them.
+  // Decode little-endian lists separately after finishing the normal FIFO work.
   aurora::gx::fifo::drain();
 
   // Process the display list through the command processor (little-endian)

@@ -20,7 +20,7 @@ endif ()
 
 if (CMAKE_SYSTEM_NAME STREQUAL Windows)
     # stuff for fetching system info.
-    target_link_libraries(aurora_core PRIVATE wbemuuid.lib comsuppw.lib ntdll.lib DXGI.lib)
+    target_link_libraries(aurora_core PRIVATE ntdll dxgi advapi32 user32)
 elseif (APPLE)
     target_sources(aurora_core PRIVATE lib/system_info_mac.mm)
 endif ()
@@ -28,21 +28,6 @@ endif ()
 if (AURORA_ENABLE_GX)
     target_sources(aurora_core PRIVATE lib/imgui.cpp)
     target_link_libraries(aurora_core PUBLIC imgui)
-endif ()
-
-if(AURORA_ENABLE_RMLUI)
-    target_compile_definitions(aurora_core PUBLIC AURORA_ENABLE_RMLUI)
-
-    target_sources(aurora_core PRIVATE
-            lib/rmlui.cpp
-            lib/rmlui/RmlUi_Backend_Aurora.cpp
-            lib/rmlui/WebGPURenderInterface.cpp
-            lib/rmlui/SystemInterface_Aurora.cpp
-            lib/rmlui/FileInterface_SDL.cpp
-    )
-    target_link_libraries(aurora_core PUBLIC rmlui)
-
-    target_link_libraries(aurora_core PUBLIC rmlui_backends)
 endif ()
 
 if (AURORA_ENABLE_GX)

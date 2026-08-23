@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <array>
+#include <memory>
 #include <type_traits>
 #include <utility>
 
@@ -31,6 +33,43 @@ static inline HashType xxh3_hash(const T& input, HashType seed = 0) {
   // hash mismatches. This also disallows floats, but that's okay for us.
   static_assert(std::has_unique_object_representations_v<T>);
   return xxh3_hash_s(&input, sizeof(T), seed);
+}
+
+// Folds two 64-bit hashes. Chaining them instead drops XXH3 onto its seeded long path past 240
+// bytes, and that path regenerates a 192-byte secret on every call.
+static inline HashType hash_combine(HashType lhs, HashType rhs) {
+  uint64_t mixed = static_cast<uint64_t>(lhs) ^ (static_cast<uint64_t>(rhs) + 0x9E3779B97F4A7C15ull +
+                                                 (static_cast<uint64_t>(lhs) << 6) + (static_cast<uint64_t>(lhs) >> 2));
+  mixed ^= mixed >> 33;
+  mixed *= 0xFF51AFD7ED558CCDull;
+  mixed ^= mixed >> 29;
+  return static_cast<HashType>(mixed);
+}
+
+// Guest-RAM write tracking hooks (see aurora_set_guest_write_hooks). A digest samples the
+// generation before reading the bytes, so a racing write costs an extra digest, never a skipped one.
+inline constexpr uint64_t kGuestWriteUntracked = AURORA_GUEST_WRITE_UNTRACKED;
+inline AuroraGuestWriteGenerationCallback g_guestWriteGenerationHook = nullptr;
+inline AuroraGuestWriteNotifyCallback g_guestWriteNotifyHook = nullptr;
+
+inline uint64_t guest_write_generation(const void* data, size_t size) noexcept {
+  if (g_guestWriteGenerationHook == nullptr || data == nullptr || size == 0) {
+    return kGuestWriteUntracked;
+  }
+  return g_guestWriteGenerationHook(data, size);
+}
+
+inline void notify_guest_write(const void* data, size_t size) noexcept {
+  if (g_guestWriteNotifyHook == nullptr || data == nullptr || size == 0) {
+    return;
+  }
+  g_guestWriteNotifyHook(data, size);
+}
+
+// True when `stored` was taken over the same untouched bytes, so its digest still describes them.
+// The untracked sentinel never matches: a source aurora cannot watch is always re-digested.
+inline bool guest_write_generation_matches(uint64_t stored, uint64_t current) noexcept {
+  return current != kGuestWriteUntracked && stored == current;
 }
 
 class Hasher {
@@ -111,6 +150,13 @@ public:
     m_length += size;
   }
 
+  // Extend the buffer without clearing the new bytes. Only for callers that overwrite the whole
+  // region: the mapped staging buffers are megabytes of write-combine memory.
+  void append_uninitialized(size_t size) {
+    resize(m_length + size, false);
+    m_length += size;
+  }
+
   void release() {
     if (m_data != nullptr && m_owned) {
       free(m_data);
@@ -139,32 +185,40 @@ private:
   size_t m_capacity = 0;
   bool m_owned = true;
 
+  // `size` is the total capacity needed. When `zeroed` is set, [m_length, size) has to read back as
+  // zero on every branch; the early return used to leave the previous frame's bytes in the padding.
   void resize(size_t size, bool zeroed) {
     if (size == 0) {
       clear();
-    } else if (m_data == nullptr) {
+      return;
+    }
+    const size_t zeroBegin = m_length;
+    if (m_data == nullptr) {
       if (zeroed) {
         m_data = static_cast<uint8_t*>(calloc(1, size));
       } else {
         m_data = static_cast<uint8_t*>(malloc(size));
       }
       m_owned = true;
-    } else if (size > m_capacity) {
+      m_capacity = size;
+      // calloc already cleared the whole allocation.
+      return;
+    }
+    if (size > m_capacity) {
       if (!m_owned) {
         abort();
       }
       // Exponential expansion to avoid O(n^2) time complexity.
-      if (size < m_capacity * 2) {
-        size = m_capacity * 2;
+      size_t capacity = size;
+      if (capacity < m_capacity * 2) {
+        capacity = m_capacity * 2;
       }
-      m_data = static_cast<uint8_t*>(realloc(m_data, size));
-      if (zeroed) {
-        memset(m_data + m_capacity, 0, size - m_capacity);
-      }
-    } else {
-      return;
+      m_data = static_cast<uint8_t*>(realloc(m_data, capacity));
+      m_capacity = capacity;
     }
-    m_capacity = size;
+    if (zeroed && size > zeroBegin) {
+      memset(m_data + zeroBegin, 0, size - zeroBegin);
+    }
   }
 };
 } // namespace aurora
@@ -173,7 +227,7 @@ namespace aurora::gfx {
 inline constexpr bool UseTextureBuffer = false;
 inline constexpr uint64_t UniformBufferSize = 25165824;  // 24mb
 inline constexpr uint64_t VertexBufferSize = 3145728;    // 3mb
-inline constexpr uint64_t IndexBufferSize = 1048576;     // 1mb
+inline constexpr uint64_t IndexBufferSize = 2097152;     // 2mb
 inline constexpr uint64_t StorageBufferSize = 8388608;   // 8mb
 inline constexpr uint64_t TextureUploadSize = 25165824;  // 24mb
 
@@ -225,14 +279,58 @@ void initialize();
 void shutdown();
 
 bool begin_frame();
+bool resume_frame();
+void abort_frame() noexcept;
 void end_frame(const wgpu::CommandEncoder& cmd);
+void end_batch(const wgpu::CommandEncoder& cmd);
 uint32_t current_frame() noexcept;
-void render(wgpu::CommandEncoder& cmd);
-void render_pass(const wgpu::RenderPassEncoder& pass, uint32_t idx);
+
+// One frame's recorded render passes, detached from the guest-visible
+// recording state. The contents are private to common.cpp.
+struct SealedFrameData;
+
+// Owns the recorded passes of a sealed frame, touched only by the thread that sealed it.
+// seal_frame() runs with the producer excluded, and the object is reused to keep its capacity.
+class SealedFrame {
+public:
+  SealedFrame();
+  ~SealedFrame();
+  SealedFrame(SealedFrame&&) noexcept;
+  SealedFrame& operator=(SealedFrame&&) noexcept;
+  SealedFrame(const SealedFrame&) = delete;
+  SealedFrame& operator=(const SealedFrame&) = delete;
+
+  [[nodiscard]] SealedFrameData& data() const noexcept { return *m_data; }
+
+private:
+  std::unique_ptr<SealedFrameData> m_data;
+};
+
+// Detach the recorded passes of the frame that just ended into `out`. Must be
+// called with the renderer GPU mutex held; see SealedFrame.
+void seal_frame(SealedFrame& out) noexcept;
+
+// Encode a sealed frame. Never touches the producer-visible recording state,
+// so this may run concurrently with the producer's FIFO drains.
+void render(SealedFrame& frame, wgpu::CommandEncoder& cmd, int32_t interpolatedFrame = -1, bool finalize = true);
+
+// Encode the frame that is still being recorded. Only for the synchronous
+// EFB-readback split path, which runs on the producer thread.
+void render(wgpu::CommandEncoder& cmd, int32_t interpolatedFrame = -1, bool finalize = true);
+
+// Sweep bind groups that have not been used for a while. Mutates the cache the producer inserts
+// into, so it may only run with the producer excluded, inside the seal prologue.
+void expire_bind_group_cache() noexcept;
 void after_submit() noexcept;
 void map_staging_buffer();
+// `persistentCopy` marks resolves whose destination outlives the frame with no re-issue path, so
+// the pass waits for its pipelines instead of dropping draws that would be baked in permanently.
 void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool clearAlpha, bool clearDepth,
-                  Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat = GX_TF_RGBA8);
+                  Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat = GX_TF_RGBA8,
+                  const Vec4<float>* sourceRectPixels = nullptr, bool halfScale = false,
+                  const std::array<u32, 3>* copyFilterCoefficients = nullptr, bool forceOpaqueAlpha = false,
+                  float copyFilterRowStride = 1.0f, bool clampTop = false, bool clampBottom = false,
+                  bool persistentCopy = false);
 
 void begin_offscreen(uint32_t width, uint32_t height);
 void end_offscreen();
@@ -273,6 +371,7 @@ Range push_texture_data(const uint8_t* data, size_t length, uint32_t bytesPerRow
 std::pair<ByteBuffer, Range> map_verts(size_t length);
 std::pair<ByteBuffer, Range> map_indices(size_t length);
 std::pair<ByteBuffer, Range> map_uniform(size_t length);
+std::pair<ByteBuffer, Range> copy_uniform(Range source);
 std::pair<ByteBuffer, Range> map_storage(size_t length);
 
 template <typename State>
@@ -284,7 +383,10 @@ DrawData* get_last_draw_command();
 
 template <typename PipelineConfig>
 PipelineRef pipeline_ref(const PipelineConfig& config);
-bool bind_pipeline(PipelineRef ref, const wgpu::RenderPassEncoder& pass);
+// `currentPipeline` is the caller's per-pass dedupe slot; as a file-static, two concurrent encoders
+// skipped each other's SetPipeline. `requireReady` refuses the skip-unready shortcut for bakes.
+bool bind_pipeline(PipelineRef ref, const wgpu::RenderPassEncoder& pass, PipelineRef& currentPipeline,
+                   bool requireReady = false);
 
 BindGroupRef bind_group_ref(const WGPUBindGroupDescriptor& descriptor);
 wgpu::BindGroup& find_bind_group(BindGroupRef id);
@@ -294,6 +396,9 @@ wgpu::Sampler& sampler_ref(const wgpu::SamplerDescriptor& descriptor);
 uint32_t align_uniform(uint32_t value);
 
 Vec2<uint32_t> get_render_target_size() noexcept;
+// Same value as get_render_target_size() outside a render pass, but never
+// touches the frame worker's render-pass list, so it is safe off-thread.
+Vec2<uint32_t> get_frame_buffer_size() noexcept;
 void set_viewport(const Viewport& viewport) noexcept;
 void set_scissor(const ClipRect& scissor) noexcept;
 

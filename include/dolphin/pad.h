@@ -95,8 +95,14 @@ typedef struct PADStatus {
   s8 stickY;
   s8 substickX;
   s8 substickY;
-  u8 triggerLeft;
-  u8 triggerRight;
+  union {
+    u8 triggerLeft;
+    u8 triggerL;
+  };
+  union {
+    u8 triggerRight;
+    u8 triggerR;
+  };
   u8 analogA;
   u8 analogB;
   s8 err;
@@ -188,6 +194,8 @@ const char* PADGetName(u32 port);
 void PADSetButtonMapping(u32 port, PADButtonMapping mapping);
 void PADSetAllButtonMappings(u32 port, PADButtonMapping buttons[PAD_BUTTON_COUNT]);
 PADButtonMapping* PADGetButtonMappings(u32 port, u32* buttonCount);
+void PADSetAltButtonMapping(u32 port, PADButtonMapping mapping);
+PADButtonMapping* PADGetAltButtonMappings(u32 port, u32* buttonCount);
 void PADSetAxisMapping(u32 port, PADAxisMapping mapping);
 void PADSetAllAxisMappings(u32 port, PADAxisMapping axes[PAD_AXIS_COUNT]);
 PADAxisMapping* PADGetAxisMappings(u32 port, u32* axisCount);

@@ -61,6 +61,8 @@ extern "C" {
 
 #define GX_LOAD_AURORA_DESTROY_COPY_TEX 0x0034
 
+#define GX_LOAD_AURORA_INVALIDATE_TEX_ALL 0x0035
+
 
 /*
  * Debug marker stuff
@@ -99,6 +101,9 @@ void AuroraSetViewportPolicy(AuroraViewportPolicy policy);
  */
 void AuroraGetRenderSize(u32* width, u32* height);
 
+/** Retrieves the current native presentation-surface size, ignoring the GX sizing policy. */
+void AuroraGetSurfaceSize(u32* width, u32* height);
+
 /**
  * Sets the actual render viewport in native framebuffer coordinates.
  * Overrides the automatically scaled values set by the logical GXSetViewport.
@@ -110,6 +115,16 @@ void GXSetViewportRender(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz)
  * Overrides the automatically scaled values set by the logical GXSetScissor.
  */
 void GXSetScissorRender(u32 left, u32 top, u32 wd, u32 ht);
+
+/** Maps the logical GX viewport and scissor into a centered safe area, for fixed-aspect UI bridges. */
+void GXSetViewportScissorRenderSafeArea(f32 aspect);
+
+/** Restores the viewport and scissor from logical GX state after GXSetViewportScissorRenderSafeArea. */
+void GXRestoreViewportScissorRender(void);
+
+/** Sets the texture-copy source in active render-target coordinates, for bridges that already
+ *  resolved VI/window scaling. */
+void GXSetTexCopySrcRender(u16 left, u16 top, u16 wd, u16 ht);
 
 /**
  * Create an offscreen framebuffer and switch rendering to it.
@@ -123,6 +138,8 @@ void GXCreateFrameBuffer(u32 width, u32 height);
  * Must be called after GXCreateFrameBuffer() to resume normal rendering.
  */
 void GXRestoreFrameBuffer(void);
+
+void GXApplyBPReg(u8 reg, u32 value);
 
 #if __cplusplus
 }

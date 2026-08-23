@@ -47,9 +47,18 @@ struct Module {
 
   template <typename... T>
   [[noreturn]] void fatal(fmt::format_string<T...> fmt, T&&... args) noexcept {
-    report(LOG_FATAL, fmt, std::forward<T>(args)...);
+    auto message = fmt::format(fmt, std::forward<T>(args)...);
+    log_internal(LOG_FATAL, name, message.c_str(), static_cast<unsigned int>(message.size()));
+    // Embedders can provide a fatal log callback, which the runtime uses for its own crash dialog.
+    // Standalone Aurora builds fall back to logging.cpp's native one.
+    if (g_config.logCallback == nullptr) {
+      show_fatal_dialog(name, message);
+    }
     std::abort();
   }
+
+private:
+  static void show_fatal_dialog(const char* module, std::string_view message) noexcept;
 };
 } // namespace aurora
 

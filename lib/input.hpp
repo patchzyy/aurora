@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <array>
 #include "dolphin/pad.h" // For PADDeaZones and PADButtonMapping
 #include "SDL3/SDL_gamepad.h"
 #include "SDL3/SDL_keyboard.h"
@@ -17,6 +18,7 @@ struct GameController {
   SDL_Gamepad* m_controller = nullptr;
   bool m_isGameCube = false;
   Sint32 m_index = -1;
+  Sint32 m_playerIndex = -1;
   bool m_hasRumble = false;
   PADDeadZones m_deadZones{
       .emulateTriggers = true,
@@ -29,6 +31,9 @@ struct GameController {
   uint16_t m_vid = 0;
   uint16_t m_pid = 0;
   std::array<PADButtonMapping, PAD_BUTTON_COUNT> m_buttonMapping{};
+  // Secondary binding per GC button; not persisted in .controller files, the
+  // runtime re-applies it from its own config whenever a controller attaches.
+  std::array<PADButtonMapping, PAD_BUTTON_COUNT> m_altButtonMapping{};
   std::array<PADAxisMapping, PAD_AXIS_COUNT> m_axisMapping{};
   uint16_t m_rumbleIntensityLow = 32767;
   uint16_t m_rumbleIntensityHigh = 32767;

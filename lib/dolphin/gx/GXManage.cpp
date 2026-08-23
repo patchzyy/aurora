@@ -262,11 +262,13 @@ GXFifoObj* GXInit(void* base, u32 size) {
 }
 
 void GXDrawDone() {
+  aurora::gx::fifo::drain();
   if (DrawDoneCB != nullptr)
     DrawDoneCB();
 }
 
 void GXSetDrawDone() {
+  aurora::gx::fifo::drain();
   if (DrawDoneCB != nullptr)
     DrawDoneCB();
 }
@@ -320,9 +322,8 @@ void __GXSetGenMode() {
 }
 
 void __GXSendFlushPrim() {
-  // Originally, this writes a dummy triangle strip draw to force the GP
-  // to process the FIFO up to this point, flushing pending BP register changes.
-  // We can skip the FIFO writes and just clear the bpSent flag.
+  // Originally a dummy triangle strip to push the GP through the FIFO and flush pending BP
+  // register changes. We can skip the FIFO writes and just clear the bpSent flag.
 
   // GX_WRITE_U8(0x98);
   // GX_WRITE_U16(__gx->vNum);
@@ -419,9 +420,8 @@ static void __SetSURegs(u32 tmap, u32 tcoord) {
 }
 
 void __GXSetSUTexRegs() {
-  // Write SU texture size/bias registers for each active TEV stage and indirect stage.
-  // Skip coords that have manual scale enabled (tcsManEnab bit set).
-  // If all coords are manual (0xFF), skip entirely.
+  // SU texture size/bias registers for each active TEV and indirect stage, skipping coords with
+  // manual scale (tcsManEnab). If all coords are manual (0xFF), skip entirely.
   if (__gx->tcsManEnab == 0xFF) {
     return;
   }
@@ -466,7 +466,7 @@ void __GXSetSUTexRegs() {
     } else {
       coord = GET_REG_FIELD(*ptref, 3, 3);
     }
-    if (tmap != 0xFF && !(__gx->tcsManEnab & (1 << coord))) {
+    if (tmap != 0xFF && !(__gx->tcsManEnab & (1 << coord)) && (__gx->texmapValid & (1u << i))) {
       __SetSURegs(tmap, coord);
     }
   }

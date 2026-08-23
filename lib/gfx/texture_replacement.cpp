@@ -51,6 +51,9 @@ struct TlutMetadata {
   uint32_t format = 0;
   uint16_t entries = 0;
   bool valid = false;
+  // Object the palette was registered from. GXLoadTlut consumes the registration, so this is what
+  // lets the same object be loaded into more than one hardware slot.
+  const GXTlutObj* source = nullptr;
   ByteBuffer data;
 };
 
@@ -236,19 +239,6 @@ const TlutMetadata* get_loaded_tlut(const GXTexObj_& obj) noexcept {
 
   const auto& tlut = s_loadedTluts[obj.tlut];
   return tlut.valid ? &tlut : nullptr;
-}
-
-std::optional<uint32_t> tlut_to_texture_format(uint32_t tlutFormat) noexcept {
-  switch (tlutFormat) {
-  case GX_TL_IA8:
-    return GX_TF_IA8;
-  case GX_TL_RGB565:
-    return GX_TF_RGB565;
-  case GX_TL_RGB5A3:
-    return GX_TF_RGB5A3;
-  default:
-    return std::nullopt;
-  }
 }
 
 bool ensure_directory(const std::filesystem::path& dir) noexcept {
@@ -705,9 +695,21 @@ void shutdown() noexcept {
   s_dumpRoot.clear();
 }
 
+// Mirrors of the guest palettes, kept only so find_replacement can hash and the DDS dump decode a
+// CI palette. The renderer uploads from the guest pointer, so skip this work when replacement is off.
 void register_tlut(const GXTlutObj* obj, const void* data, GXTlutFmt format, uint16_t entries) noexcept {
+  if (!g_config.allowTextureReplacements) {
+    return;
+  }
   if (obj == nullptr || data == nullptr) {
     return;
+  }
+
+  // A registration is only consumed by a matching load_tlut, and the map is keyed by a guest address
+  // the game may free and reuse, so a table this large means stale entries: drop them wholesale.
+  constexpr size_t kMaxPendingTluts = 4096;
+  if (s_pendingTluts.size() >= kMaxPendingTluts && !s_pendingTluts.contains(obj)) {
+    s_pendingTluts.clear();
   }
 
   const size_t sz = static_cast<size_t>(entries) * 2;
@@ -718,29 +720,45 @@ void register_tlut(const GXTlutObj* obj, const void* data, GXTlutFmt format, uin
       .format = static_cast<uint32_t>(format),
       .entries = entries,
       .valid = true,
+      .source = obj,
       .data = std::move(buffer),
   };
 }
 
 void load_tlut(const GXTlutObj* obj, uint32_t idx) noexcept {
+  if (!g_config.allowTextureReplacements) {
+    return;
+  }
   if (idx >= s_loadedTluts.size()) {
     return;
   }
 
-  const auto it = s_pendingTluts.find(obj);
-  if (it == s_pendingTluts.end()) {
-    s_loadedTluts[idx] = {};
+  // Consume the pending registration. The map is keyed by a guest object address that can be freed
+  // or reused at any time, and entries used to live until shutdown.
+  if (const auto it = s_pendingTluts.find(obj); it != s_pendingTluts.end()) {
+    s_loadedTluts[idx] = std::move(it->second);
+    s_pendingTluts.erase(it);
     return;
   }
 
-  const auto& pending = it->second;
-  s_loadedTluts[idx] = {
-      .size = pending.size,
-      .format = pending.format,
-      .entries = pending.entries,
-      .valid = pending.valid,
-      .data = pending.data.clone(),
-  };
+  // The same object may legally be loaded into several hardware slots; only the first load finds the
+  // pending entry, so recover the palette from whichever slot already holds it.
+  for (const auto& loaded : s_loadedTluts) {
+    if (!loaded.valid || loaded.source != obj) {
+      continue;
+    }
+    s_loadedTluts[idx] = {
+        .size = loaded.size,
+        .format = loaded.format,
+        .entries = loaded.entries,
+        .valid = loaded.valid,
+        .source = loaded.source,
+        .data = loaded.data.clone(),
+    };
+    return;
+  }
+
+  s_loadedTluts[idx] = {};
 }
 
 std::optional<TextureHandle> find_replacement(const GXTexObj_& obj) noexcept {

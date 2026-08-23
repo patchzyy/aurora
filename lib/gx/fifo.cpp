@@ -2,8 +2,12 @@
 #include "command_processor.hpp"
 #include "../internal.hpp"
 
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+
+#include "tracy/Tracy.hpp"
 
 namespace aurora::gx::fifo {
 static Module Log("aurora::gx::fifo");
@@ -20,6 +24,7 @@ uint32_t sDlWritePos = 0;
 
 void init() {
   constexpr uint32_t initialCapacity = 64 * 1024;
+  reset_cp_register_cache();
   free(detail::sBufferData);
   detail::sBufferData = static_cast<uint8_t*>(malloc(initialCapacity));
   detail::sBufferSize = 0;
@@ -61,7 +66,18 @@ uint32_t end_display_list() {
 
 bool in_display_list() { return detail::sInDisplayList; }
 
+// How much of the producer's frame is spent blocked before it may decode the next batch of GX commands.
+static void note_drain_wait(uint64_t nanos) noexcept {
+  ZoneScopedN("FIFO drain wait");
+  TracyPlot("aurora: fifoDrainWaitUs", static_cast<int64_t>(nanos / 1000));
+}
+
 void drain() {
+  // SEALED, not DONE.
+  const auto waited = aurora::wait_for_frame_worker_sealed();
+  if (waited.count() > 0) UNLIKELY {
+    note_drain_wait(static_cast<uint64_t>(waited.count()));
+  }
   if (detail::sBufferSize == 0) {
     return;
   }
@@ -71,6 +87,8 @@ void drain() {
 
 const uint8_t* get_buffer_data() { return detail::sBufferData; }
 uint32_t get_buffer_size() { return detail::sBufferSize; }
-void clear_buffer() { detail::sBufferSize = 0; }
+void clear_buffer() {
+  detail::sBufferSize = 0;
+}
 
 } // namespace aurora::gx::fifo

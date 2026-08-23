@@ -5,34 +5,48 @@
 
 extern "C" {
 void GXSetFog(GXFogType type, float startZ, float endZ, float nearZ, float farZ, GXColor color) {
-  // Compute fog coefficients matching SDK
-  f32 A, B, C;
-  if (farZ == nearZ || endZ == startZ) {
-    A = 0.0f;
-    B = 0.5f;
-    C = 0.0f;
-  } else {
-    A = (farZ * nearZ) / ((farZ - nearZ) * (endZ - startZ));
-    B = farZ / (farZ - nearZ);
-    C = startZ / (endZ - startZ);
-  }
+  // Compute fog coefficients matching SDK.
+  const bool orthographic = (static_cast<u32>(type) & 0x8u) != 0;
+  f32 a = 0.0f;
+  f32 c = 0.0f;
+  u32 b_m = 0;
+  u32 b_s = 0;
 
-  // Normalize B mantissa
-  f32 B_mant = B;
-  u32 B_expn = 0;
-  while (B_mant > 1.0f) {
-    B_mant *= 0.5f;
-    B_expn++;
-  }
-  while (B_mant > 0.0f && B_mant < 0.5f) {
-    B_mant *= 2.0f;
-    B_expn--;
-  }
+  if (!orthographic) {
+    f32 A;
+    f32 B;
+    f32 C;
+    if (farZ == nearZ || endZ == startZ) {
+      A = 0.0f;
+      B = 0.5f;
+      C = 0.0f;
+    } else {
+      A = (farZ * nearZ) / ((farZ - nearZ) * (endZ - startZ));
+      B = farZ / (farZ - nearZ);
+      C = startZ / (endZ - startZ);
+    }
 
-  f32 a = A / static_cast<f32>(1 << (B_expn + 1));
-  u32 b_m = static_cast<u32>(8.388638e6f * B_mant);
-  u32 b_s = B_expn + 1;
-  f32 c = C;
+    // Normalize B mantissa.
+    f32 B_mant = B;
+    int B_expn = 0;
+    while (B_mant > 1.0f) {
+      B_mant *= 0.5f;
+      B_expn++;
+    }
+    while (B_mant > 0.0f && B_mant < 0.5f) {
+      B_mant *= 2.0f;
+      B_expn--;
+    }
+
+    a = std::ldexp(A, -(B_expn + 1));
+    b_m = static_cast<u32>(8.388638e6f * B_mant);
+    b_s = static_cast<u32>(B_expn + 1) & 0x1Fu;
+    c = C;
+  } else if (farZ != nearZ && endZ != startZ) {
+    const f32 invDepthRange = 1.0f / (endZ - startZ);
+    a = invDepthRange * (farZ - nearZ);
+    c = invDepthRange * (startZ - nearZ);
+  }
 
   u32 a_hex, c_hex;
   std::memcpy(&a_hex, &a, sizeof(a_hex));
@@ -60,7 +74,8 @@ void GXSetFog(GXFogType type, float startZ, float endZ, float nearZ, float farZ,
   SET_REG_FIELD(0, fog3, 11, 0, (c_hex >> 12) & 0x7FF);
   SET_REG_FIELD(0, fog3, 8, 11, (c_hex >> 23) & 0xFF);
   SET_REG_FIELD(0, fog3, 1, 19, (c_hex >> 31));
-  SET_REG_FIELD(0, fog3, 3, 21, type);
+  SET_REG_FIELD(0, fog3, 1, 20, orthographic ? 1 : 0);
+  SET_REG_FIELD(0, fog3, 3, 21, static_cast<u32>(type) & 0x7u);
   SET_REG_FIELD(0, fog3, 8, 24, 0xF1);
 
   // BP FOGCLR (0xF2) - color

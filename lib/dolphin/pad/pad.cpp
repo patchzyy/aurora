@@ -399,11 +399,20 @@ void PADClearPort(const u32 port) {
   SDL_SetGamepadPlayerIndex(ctrl->m_controller, -1);
 }
 
+// Secondary bindings live only in memory; the runtime re-applies them from its
+// config after every (re)load, so any mapping reset also clears them.
+static void reset_alt_button_mapping(aurora::input::GameController* controller) {
+  for (size_t i = 0; i < PAD_BUTTON_COUNT; ++i) {
+    controller->m_altButtonMapping[i] = {PAD_NATIVE_BUTTON_INVALID, controller->m_buttonMapping[i].padButton};
+  }
+}
+
 void __PADSetDefaultMapping(aurora::input::GameController* controller) /*  NOLINT(*-reserved-identifier) */
 {
   switch (SDL_GetGamepadType(controller->m_controller)) {
   case SDL_GAMEPAD_TYPE_XBOX360:
     controller->m_buttonMapping = g_defaultButtonsXBox360;
+    break;
   case SDL_GAMEPAD_TYPE_XBOXONE:
     controller->m_buttonMapping = g_defaultButtonsXBoxOne;
     break;
@@ -439,6 +448,41 @@ void __PADSetDefaultMapping(aurora::input::GameController* controller) /*  NOLIN
     controller->m_buttonMapping = g_defaultButtonsStandard;
     break;
   }
+  reset_alt_button_mapping(controller);
+}
+
+static bool is_valid_native_axis(const PADSignedNativeAxis axis) {
+  return axis.nativeAxis == -1 ||
+         (axis.nativeAxis >= 0 && axis.nativeAxis < SDL_GAMEPAD_AXIS_COUNT &&
+          (axis.sign == AXIS_SIGN_POSITIVE || axis.sign == AXIS_SIGN_NEGATIVE));
+}
+
+static PADDeadZones default_dead_zones(const aurora::input::GameController& controller) {
+  return {
+      .emulateTriggers = !(controller.m_isGameCube ||
+                           (SDL_GetGamepadType(controller.m_controller) == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO &&
+                            controller.m_pid == 0x2073)),
+      .useDeadzones = true,
+      .stickDeadZone = 8000,
+      .substickDeadZone = 8000,
+      .leftTriggerActivationZone = 31150,
+      .rightTriggerActivationZone = 31150,
+  };
+}
+
+static void sanitize_dead_zones(aurora::input::GameController* controller, const int32_t playerIndex) {
+  PADDeadZones& deadZones = controller->m_deadZones;
+  const bool invalid =
+      deadZones.stickDeadZone > SDL_JOYSTICK_AXIS_MAX || deadZones.substickDeadZone > SDL_JOYSTICK_AXIS_MAX ||
+      deadZones.leftTriggerActivationZone > SDL_JOYSTICK_AXIS_MAX ||
+      deadZones.rightTriggerActivationZone > SDL_JOYSTICK_AXIS_MAX;
+  if (!invalid) {
+    return;
+  }
+
+  aurora::input::Log.warn("__PADLoadMapping port={}: invalid deadzone data in file, resetting to defaults",
+                          playerIndex);
+  deadZones = default_dead_zones(*controller);
 }
 
 void __PADLoadMapping(aurora::input::GameController* controller) /*  NOLINT(*-reserved-identifier) */ {
@@ -466,6 +510,7 @@ void __PADLoadMapping(aurora::input::GameController* controller) /*  NOLINT(*-re
   SDL_ReadU32LE(file, &magic);
   if (magic != SBIG('CTRL')) {
     aurora::input::Log.warn("Invalid controller mapping magic!");
+    SDL_CloseIO(file);
     return;
   }
 
@@ -474,6 +519,7 @@ void __PADLoadMapping(aurora::input::GameController* controller) /*  NOLINT(*-re
   if (version != k_mappingsFileVersion) {
     aurora::input::Log.warn("Invalid controller mapping version! (Expected {0}, found {1})", k_mappingsFileVersion,
                             version);
+    SDL_CloseIO(file);
     return;
   }
 
@@ -483,6 +529,7 @@ void __PADLoadMapping(aurora::input::GameController* controller) /*  NOLINT(*-re
   const auto dataStart = SDL_TellIO(file);
   if (dataStart == -1) {
     aurora::input::Log.warn("Unable to seek in controller bindings! Path: \"{}\"", path);
+    SDL_CloseIO(file);
     return;
   }
   if (isGameCube) {
@@ -500,10 +547,12 @@ void __PADLoadMapping(aurora::input::GameController* controller) /*  NOLINT(*-re
     SDL_ReadIO(file, &controller->m_rumbleIntensityHigh, sizeof(u16));
   }
   SDL_CloseIO(file);
+  sanitize_dead_zones(controller, playerIndex);
 
   bool axisCorrupt = false;
   for (uint32_t i = 0; i < PAD_AXIS_COUNT; ++i) {
-    if (controller->m_axisMapping[i].padAxis != static_cast<PADAxis>(i)) {
+    if (controller->m_axisMapping[i].padAxis != static_cast<PADAxis>(i) ||
+        !is_valid_native_axis(controller->m_axisMapping[i].nativeAxis)) {
       axisCorrupt = true;
       break;
     }
@@ -526,6 +575,7 @@ void __PADLoadMapping(aurora::input::GameController* controller) /*  NOLINT(*-re
                             playerIndex);
     __PADSetDefaultMapping(controller);
   }
+  reset_alt_button_mapping(controller);
 }
 
 static void EnsureMappingLoaded(aurora::input::GameController* controller) {
@@ -544,10 +594,15 @@ static Sint16 _get_axis_value(const aurora::input::GameController* controller, /
 
   if (iter->nativeAxis.nativeAxis != -1) {
     const auto [nativeAxis, sign] = iter->nativeAxis;
-    // clamp value to avoid overflow when casting to Sint16 if -32768 is negated
-    return static_cast<Sint16>(
-        std::min(SDL_GetGamepadAxis(controller->m_controller, static_cast<SDL_GamepadAxis>(nativeAxis)) * sign,
-                 SDL_JOYSTICK_AXIS_MAX));
+    const auto value = SDL_GetGamepadAxis(controller->m_controller, static_cast<SDL_GamepadAxis>(nativeAxis));
+    if (sign == AXIS_SIGN_POSITIVE) {
+      return value > 0 ? value : 0;
+    }
+    if (value >= 0) {
+      return 0;
+    }
+    // Clamp before negating so SDL's -32768 minimum fits in Sint16.
+    return static_cast<Sint16>(value == SDL_JOYSTICK_AXIS_MIN ? SDL_JOYSTICK_AXIS_MAX : -value);
   }
 
   assert(iter->nativeButton != -1);
@@ -702,6 +757,23 @@ u32 PADRead(PADStatus* status) {
         }
       });
 
+      std::ranges::for_each(controller->m_altButtonMapping, [&controller, &i, &status, &leftTriggerSet,
+                                                             &rightTriggerSet](const auto& mapping) {
+        if (mapping.nativeButton == PAD_NATIVE_BUTTON_INVALID) {
+          return;
+        }
+        if (SDL_GetGamepadButton(controller->m_controller, static_cast<SDL_GamepadButton>(mapping.nativeButton))) {
+          status[i].button |= mapping.padButton;
+        }
+
+        if (mapping.padButton == PAD_TRIGGER_L) {
+          leftTriggerSet = true;
+        }
+        if (mapping.padButton == PAD_TRIGGER_R) {
+          rightTriggerSet = true;
+        }
+      });
+
       // TODO: Add serializable mappings for these (probably not necessary)?
       static constexpr std::array<std::pair<SDL_GamepadButton, PADExtButton>, PAD_EXT_BUTTON_COUNT> kExtButtonMappings{{
           {SDL_GAMEPAD_BUTTON_BACK, PAD_BUTTON_BACK},
@@ -732,9 +804,8 @@ u32 PADRead(PADStatus* status) {
       const auto ylPos = _get_axis_value(controller, PAD_AXIS_LEFT_Y_POS);
       const auto ylNeg = _get_axis_value(controller, PAD_AXIS_LEFT_Y_NEG);
 
-      auto xl = static_cast<Sint16>((xlPos + -xlNeg) / 2);
-      // SDL's gamepad y-axis is inverted from GC's
-      auto yl = static_cast<Sint16>((-ylPos + ylNeg) / 2);
+      auto xl = static_cast<Sint16>(xlPos - xlNeg);
+      auto yl = static_cast<Sint16>(ylPos - ylNeg);
       if (controller->m_deadZones.useDeadzones) {
         if (std::abs(xl) > controller->m_deadZones.stickDeadZone) {
           xl /= 256;
@@ -742,13 +813,13 @@ u32 PADRead(PADStatus* status) {
           xl = 0;
         }
         if (std::abs(yl) > controller->m_deadZones.stickDeadZone) {
-          yl = static_cast<Sint16>(-(yl + 1u) / 256u);
+          yl /= 256;
         } else {
           yl = 0;
         }
       } else {
         xl /= 256;
-        yl = static_cast<Sint16>(-(yl + 1u) / 256u);
+        yl /= 256;
       }
 
       status[i].stickX = static_cast<int8_t>(xl);
@@ -759,9 +830,8 @@ u32 PADRead(PADStatus* status) {
       const auto yrPos = _get_axis_value(controller, PAD_AXIS_RIGHT_Y_POS);
       const auto yrNeg = _get_axis_value(controller, PAD_AXIS_RIGHT_Y_NEG);
 
-      auto xr = static_cast<Sint16>((xrPos + -xrNeg) / 2);
-      // SDL's gamepad y-axis is inverted from GC's
-      auto yr = static_cast<Sint16>((-yrPos + yrNeg) / 2);
+      auto xr = static_cast<Sint16>(xrPos - xrNeg);
+      auto yr = static_cast<Sint16>(yrPos - yrNeg);
       if (controller->m_deadZones.useDeadzones) {
         if (std::abs(xr) > controller->m_deadZones.substickDeadZone) {
           xr /= 256;
@@ -770,13 +840,13 @@ u32 PADRead(PADStatus* status) {
         }
 
         if (std::abs(yr) > controller->m_deadZones.substickDeadZone) {
-          yr = static_cast<Sint16>(-(yr + 1u) / 256u);
+          yr /= 256;
         } else {
           yr = 0;
         }
       } else {
         xr /= 256;
-        yr = static_cast<Sint16>(-(yr + 1u) / 256u);
+        yr /= 256;
       }
 
       status[i].substickX = static_cast<int8_t>(xr);
@@ -1030,6 +1100,33 @@ PADButtonMapping* PADGetButtonMappings(const u32 port, u32* buttonCount) {
 
   *buttonCount = PAD_BUTTON_COUNT;
   return controller->m_buttonMapping.data();
+}
+
+void PADSetAltButtonMapping(const u32 port, const PADButtonMapping mapping) {
+  auto* controller = aurora::input::get_controller_for_player(port);
+  if (controller == nullptr) {
+    return;
+  }
+
+  const auto iter = std::ranges::find_if(controller->m_altButtonMapping,
+                                         [mapping](const auto& pair) { return mapping.padButton == pair.padButton; });
+  if (iter == controller->m_altButtonMapping.end()) {
+    return;
+  }
+
+  *iter = mapping;
+}
+
+PADButtonMapping* PADGetAltButtonMappings(const u32 port, u32* buttonCount) {
+  auto* controller = aurora::input::get_controller_for_player(port);
+  if (controller == nullptr) {
+    *buttonCount = 0;
+    return nullptr;
+  }
+
+  EnsureMappingLoaded(controller);
+  *buttonCount = PAD_BUTTON_COUNT;
+  return controller->m_altButtonMapping.data();
 }
 
 void PADSetAxisMapping(const u32 port, const PADAxisMapping mapping) {

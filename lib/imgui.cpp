@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cmath>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -21,21 +22,36 @@
 
 namespace aurora::imgui {
 static float g_scale;
-static std::string g_imguiSettings{};
 static std::string g_imguiLog{};
 static bool g_useSdlRenderer = false;
+// Set once ImGui::Render() has produced this frame's draw data. Interpolation encodes up to four
+// ImGui passes per frame, and every one of them used to rebuild the draw lists from scratch.
+static bool g_frameDataBuilt = false;
 
 static std::vector<SDL_Texture*> g_sdlTextures;
 static std::vector<wgpu::Texture> g_wgpuTextures;
+
+void remove_legacy_ini_file(const char* basePath) noexcept {
+  if (basePath == nullptr || *basePath == '\0') {
+    return;
+  }
+
+  std::error_code ec;
+  std::filesystem::remove(std::filesystem::path{basePath} / "imgui.ini", ec);
+}
 
 void create_context() noexcept {
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
   ImGuiIO& io = ImGui::GetIO();
-  g_imguiSettings = std::string{g_config.userPath} + "/imgui.ini";
+  io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+  remove_legacy_ini_file(g_config.userPath);
+  remove_legacy_ini_file(g_config.cachePath);
   g_imguiLog = std::string{g_config.cachePath} + "/imgui.log";
-  io.IniFilename = g_imguiSettings.c_str();
+  io.IniFilename = nullptr;
   io.LogFilename = g_imguiLog.c_str();
+  ImGui::LoadIniSettingsFromMemory("", 0);
+  io.WantSaveIniSettings = false;
 }
 
 void initialize() noexcept {
@@ -49,6 +65,9 @@ void initialize() noexcept {
     ImGui_ImplWGPU_InitInfo info;
     info.Device = webgpu::g_device.Get();
     info.RenderTargetFormat = static_cast<WGPUTextureFormat>(webgpu::g_graphicsConfig.surfaceConfiguration.format);
+    // Interpolation records up to four ImGui passes in one command buffer, so keep three logical
+    // frames of renderer resources to stop them overwriting each other's vertex/index buffers.
+    info.NumFramesInFlight = 12;
     ImGui_ImplWGPU_Init(&info);
   }
 }
@@ -149,14 +168,25 @@ void new_frame(const AuroraWindowSize& size) noexcept {
   io.DisplayFramebufferScale = framebufferScale;
   ImGui::GetIO().DisplaySize = displaySize;
   ImGui::NewFrame();
+  g_frameDataBuilt = false;
+}
+
+void render_frame_data() noexcept {
+  ZoneScoped;
+  if (g_frameDataBuilt) {
+    return;
+  }
+  ImGui::Render();
+  auto* data = ImGui::GetDrawData();
+  data->FramebufferScale = ImGui::GetIO().DisplayFramebufferScale;
+  g_frameDataBuilt = true;
 }
 
 void render(const wgpu::RenderPassEncoder& pass) noexcept {
   ZoneScoped;
-  ImGui::Render();
+  render_frame_data();
 
   auto* data = ImGui::GetDrawData();
-  data->FramebufferScale = ImGui::GetIO().DisplayFramebufferScale;
   if (g_useSdlRenderer) {
     SDL_Renderer* renderer = window::get_sdl_renderer();
     SDL_RenderClear(renderer);

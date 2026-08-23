@@ -61,13 +61,19 @@ void GXSetIndTexCoordScale(GXIndTexStageID indStage, GXIndTexScale scaleS, GXInd
 }
 
 void GXSetIndTexMtx(GXIndTexMtxID id, const void* offset, s8 scaleExp) {
-  CHECK(id >= GX_ITM_0 && id <= GX_ITM_2, "invalid ind tex mtx ID {}", static_cast<int>(id));
+  u32 idx = 0;
+  if (id >= GX_ITM_0 && id <= GX_ITM_2) {
+    idx = id - GX_ITM_0;
+  } else if (id >= GX_ITM_S0 && id <= GX_ITM_S2) {
+    idx = id - GX_ITM_S0;
+  } else if (id >= GX_ITM_T0 && id <= GX_ITM_T2) {
+    idx = id - GX_ITM_T0;
+  }
 
   const auto* mtx = reinterpret_cast<const f32*>(offset);
   s32 adjScale = scaleExp + 17;
 
   // Write 3 BP registers for the 2x3 matrix
-  u32 idx = id - 1;
 
   // Column 0: m[0][0] and m[1][0]
   u32 reg0 = 0;

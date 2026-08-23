@@ -17,6 +17,8 @@ if (AURORA_ENABLE_GX)
   add_executable(gx_fifo_tests
     gx_fifo_test.cpp
     gx_test_stubs.cpp
+    texture_bind_group_cache_key_test.cpp
+    ../lib/gfx/efb_ram_encoder.cpp
     # GX API implementations (encoders)
     ../lib/dolphin/gx/GXBump.cpp
     ../lib/dolphin/gx/GXCull.cpp
@@ -31,7 +33,6 @@ if (AURORA_ENABLE_GX)
     ../lib/dolphin/gx/GXLighting.cpp
     ../lib/dolphin/gx/GXManage.cpp
     ../lib/dolphin/gx/GXAurora.cpp
-    ../lib/dolphin/gx/GXPerf.cpp
     ../lib/dolphin/gx/GXPixel.cpp
     ../lib/dolphin/gx/GXTev.cpp
     ../lib/dolphin/gx/GXTexture.cpp
@@ -40,6 +41,8 @@ if (AURORA_ENABLE_GX)
     # FIFO/command processor (encoder + decoder)
     ../lib/gx/fifo.cpp
     ../lib/gx/command_processor.cpp
+    ../lib/gx/shader_info.cpp
+    ../lib/gx/frame_interpolation.cpp
   )
 
   target_include_directories(gx_fifo_tests PRIVATE

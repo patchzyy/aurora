@@ -603,67 +603,6 @@ ECardResult CardRawFile::setStatus(uint32_t fileNo, const CardStat& stat) {
   return ECardResult::READY;
 }
 
-#if 0 // TODO: Async-friendly implementations
-bool Card::copyFileTo(FileHandle& fh, Card& dest)
-{
-    if (!canCopy(fh))
-        return false;
-
-    /* Do a self test to avoid adding a file to itself */
-    if (this == &dest)
-        return false;
-
-    /* Now to add fh */
-    File* toCopy = _fileFromHandle(fh);
-    if (!toCopy)
-        return false;
-
-    /* Check to make sure dest does not already contain fh */
-    FileHandle tmpHandle;
-    dest.openFile(toCopy->m_filename, tmpHandle);
-    if (tmpHandle)
-        return false;
-
-    /* Try to allocate a new file */
-    dest.createFile(toCopy->m_filename, toCopy->m_blockCount * BlockSize, tmpHandle);
-    if (!tmpHandle)
-        return false;
-
-    /* Now copy the file information over */
-    File* copyDest = dest._fileFromHandle(tmpHandle);
-    File copyTmp = *copyDest;
-    *copyDest = *toCopy;
-    copyDest->m_firstBlock = copyTmp.m_firstBlock;
-    copyDest->m_copyCounter++;
-
-    /* Finally lets get the data copied over! */
-    uint32_t len = toCopy->m_blockCount * BlockSize;
-    uint32_t oldPos = tell(fh);
-    seek(fh, 0, SeekOrigin::Begin);
-    while (len > 0)
-    {
-        uint8_t tmp[BlockSize];
-        read(fh, tmp, BlockSize);
-        dest.write(tmpHandle, tmp, BlockSize);
-        len -= BlockSize;
-    }
-
-    seek(fh, oldPos, SeekOrigin::Begin);
-    return true;
-}
-
-bool Card::moveFileTo(FileHandle& fh, Card& dest)
-{
-    if (copyFileTo(fh, dest) && canMove(fh))
-    {
-        deleteFile(fh);
-        return true;
-    }
-
-    return false;
-}
-#endif
-
 void CardRawFile::setCurrentGame(const char* game) {
   if (game == nullptr) {
     std::memset(m_game, 0, sizeof(m_game));

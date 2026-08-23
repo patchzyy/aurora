@@ -28,7 +28,6 @@ It now powers several completed source ports, including [Dusklight](https://gith
 - CARD compatibility layer
   - Full compatibility with Dolphin `.gci` and `.raw` for game saves
 - [Dear ImGui](https://github.com/ocornut/imgui) built-in for simple debug UIs
-- [RmlUi](https://github.com/mikke89/RmlUi) built-in for full-fledged HTML/CSS-based UIs
 
 ### Graphics
 
